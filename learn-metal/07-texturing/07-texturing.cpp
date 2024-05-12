@@ -68,6 +68,8 @@ class Renderer
         MTL::RenderPipelineState* _pPSO;
         MTL::DepthStencilState* _pDepthStencilState;
         MTL::Texture* _pTexture;
+        MTL::Texture* _pColorTexture;
+        MTL::Texture* _pDepthTexture;
         MTL::Buffer* _pVertexDataBuffer;
         MTL::Buffer* _pInstanceDataBuffer[kMaxFramesInFlight];
         MTL::Buffer* _pCameraDataBuffer[kMaxFramesInFlight];
@@ -143,7 +145,7 @@ bool MyAppDelegate::applicationDidFinishLaunching( UI::Application *pApp, NS::Va
 
     _pMtkView = MTK::View::alloc()->init( frame, _pDevice );
     _pMtkView->setColorPixelFormat( MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB );
-    _pMtkView->setClearColor( MTL::ClearColor::Make( 0.1, 0.1, 0.1, 1.0 ) );
+    _pMtkView->setClearColor( MTL::ClearColor::Make( 0, 0.0, 1.1, 1.0 ) );
     _pMtkView->setDepthStencilPixelFormat( MTL::PixelFormat::PixelFormatDepth16Unorm );
     _pMtkView->setClearDepth( 1.0f );
 
@@ -298,6 +300,8 @@ Renderer::Renderer( MTL::Device* pDevice )
 Renderer::~Renderer()
 {
     _pTexture->release();
+    _pColorTexture->release();
+    _pDepthTexture->release();
     _pShaderLibrary->release();
     _pDepthStencilState->release();
     _pVertexDataBuffer->release();
@@ -353,6 +357,7 @@ void Renderer::buildShaders()
             float3 normal;
             half3 color;
             float2 texcoord;
+            //uint layer;// [[render_target_array_index]];
         };
 
         struct VertexData
@@ -379,6 +384,7 @@ void Renderer::buildShaders()
         v2f vertex vertexMain( device const VertexData* vertexData [[buffer(0)]],
                                device const InstanceData* instanceData [[buffer(1)]],
                                device const CameraData& cameraData [[buffer(2)]],
+//                               uint amplificationId [[amplification_id]],
                                uint vertexId [[vertex_id]],
                                uint instanceId [[instance_id]] )
         {
@@ -397,6 +403,7 @@ void Renderer::buildShaders()
             o.texcoord = vd.texcoord.xy;
 
             o.color = half3( instanceData[ instanceId ].instanceColor.rgb );
+            //o.layer = 1;            o.layer = amplificationId;
             return o;
         }
 
@@ -428,10 +435,12 @@ void Renderer::buildShaders()
     MTL::Function* pFragFn = pLibrary->newFunction( NS::String::string("fragmentMain", UTF8StringEncoding) );
 
     MTL::RenderPipelineDescriptor* pDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+    pDesc->setInputPrimitiveTopology(MTL::PrimitiveTopologyClassTriangle);
     pDesc->setVertexFunction( pVertexFn );
     pDesc->setFragmentFunction( pFragFn );
     pDesc->colorAttachments()->object(0)->setPixelFormat( MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB );
     pDesc->setDepthAttachmentPixelFormat( MTL::PixelFormat::PixelFormatDepth16Unorm );
+//    pDesc->setMaxVertexAmplificationCount(2);
 
     _pPSO = _pDevice->newRenderPipelineState( pDesc, &pError );
     if ( !_pPSO )
@@ -467,11 +476,28 @@ void Renderer::buildTextures()
     pTextureDesc->setHeight( th );
     pTextureDesc->setPixelFormat( MTL::PixelFormatRGBA8Unorm );
     pTextureDesc->setTextureType( MTL::TextureType2D );
-    pTextureDesc->setStorageMode( MTL::StorageModeShared );
+    pTextureDesc->setStorageMode( MTL::StorageModeManaged );
     pTextureDesc->setUsage( MTL::ResourceUsageSample | MTL::ResourceUsageRead );
+    _pTexture = _pDevice->newTexture( pTextureDesc );
 
-    MTL::Texture *pTexture = _pDevice->newTexture( pTextureDesc );
-    _pTexture = pTexture;
+
+    //anning
+    pTextureDesc->setWidth( 2048 );
+    pTextureDesc->setHeight( 2048 );
+    pTextureDesc->setStorageMode( MTL::StorageModePrivate );
+//    pTextureDesc->setTextureType( MTL::TextureType2DArray );
+    pTextureDesc->setTextureType( MTL::TextureType2D );
+    pTextureDesc->setUsage( MTL::ResourceUsageSample | MTL::ResourceUsageRead );
+//    pTextureDesc->setArrayLength( 2 );
+    pTextureDesc->setPixelFormat(MTL::PixelFormatBGRA8Unorm_sRGB);
+    _pColorTexture = _pDevice->newTexture( pTextureDesc );
+
+    pTextureDesc->setStorageMode( MTL::StorageModePrivate );
+    pTextureDesc->setUsage( MTL::ResourceUsageSample );
+//    pTextureDesc->setArrayLength( 2 );
+    pTextureDesc->setPixelFormat(MTL::PixelFormatDepth16Unorm);
+    _pDepthTexture = _pDevice->newTexture( pTextureDesc );
+    //anning
 
     uint8_t* pTextureData = (uint8_t *)alloca( tw * th * 4 );
     for ( size_t y = 0; y < th; ++y )
@@ -650,9 +676,64 @@ void Renderer::draw( MTK::View* pView )
     pCameraData->worldNormalTransform = math::discardTranslation( pCameraData->worldTransform );
 
     // Begin render pass:
+    
+    //anning
+    MTL::RenderPassDescriptor* pDesc = MTL::RenderPassDescriptor::alloc()->init();
+    pDesc->colorAttachments()->object(0)->setTexture(_pColorTexture);
+    pDesc->colorAttachments()->object(0)->setClearColor(MTL::ClearColor::Make( 1, 1.1, 0.1, 1.0 ));
+    pDesc->colorAttachments()->object(0)->setStoreAction(MTL::StoreActionStore);
+    pDesc->colorAttachments()->object(0)->setLoadAction(MTL::LoadActionClear);
+    pDesc->depthAttachment()->setTexture(_pDepthTexture);
+    pDesc->depthAttachment()->setStoreAction(MTL::StoreActionStore);
+//    pDesc->setRenderTargetArrayLength(2);
+
+
+    MTL::RasterizationRateMapDescriptor *descriptor = MTL::RasterizationRateMapDescriptor::alloc()->init();
+    
+    MTL::Size screenSize = MTL::Size::Make(pDesc->colorAttachments()->object(0)->texture()->width(), pDesc->colorAttachments()->object(0)->texture()->height(), 1);
+
+    screenSize.width *= .5;
+    screenSize.height *= 1;
+    descriptor->setScreenSize(screenSize);
+
+    MTL::Size zoneCounts = MTL::Size::Make(20, 1, 1);
+    MTL::RasterizationRateLayerDescriptor *layerDescriptor =
+
+    MTL::RasterizationRateLayerDescriptor::alloc()->init(zoneCounts);
+
+    for (int row = 0; row < zoneCounts.height; row++)
+    {
+        layerDescriptor->vertical()->setObject(NS::Number::number(1.0), row);
+    }
+    for (int column = 0; column < zoneCounts.width; column++)
+    {
+//        layerDescriptor->horizontal()->setObject(NS::Number::number(0.001), column);
+        layerDescriptor->horizontal()->setObject(NS::Number::number(1), column);
+    }
+//    layerDescriptor->horizontal()->setObject(NS::Number::number(0.00), zoneCounts.width / 2);
+//    layerDescriptor->vertical()->setObject(NS::Number::number(0.00), zoneCounts.height / 2);
+//    layerDescriptor->vertical()->setObject(NS::Number::number(0.1), 0);
+//    layerDescriptor->horizontal()->setObject(NS::Number::number(.3), 1);
+//    layerDescriptor->horizontal()->setObject(NS::Number::number(0.3), 7);
+//    layerDescriptor->vertical()->setObject(NS::Number::number(0.3), 0);
+//    layerDescriptor->vertical()->setObject(NS::Number::number(0.3), 3);
+
+    descriptor->setLayer(layerDescriptor, 0);
+    
+    MTL::RasterizationRateMap *rateMap = _pDevice->newRasterizationRateMap(descriptor);
+
+    MTL::Size size = rateMap->screenSize();
+    MTL::Size physicalSizes = rateMap->physicalSize(0);
+    MTL::Size gran = rateMap->physicalGranularity();
+
+    //pDesc->setRasterizationRateMap(rateMap);
+    
+
+    MTL::RenderCommandEncoder* pEnc = pCmd->renderCommandEncoder( pDesc );
+    //anning
 
     MTL::RenderPassDescriptor* pRpd = pView->currentRenderPassDescriptor();
-    MTL::RenderCommandEncoder* pEnc = pCmd->renderCommandEncoder( pRpd );
+//    MTL::RenderCommandEncoder* pEnc = pCmd->renderCommandEncoder( pRpd );
 
     pEnc->setRenderPipelineState( _pPSO );
     pEnc->setDepthStencilState( _pDepthStencilState );
@@ -660,6 +741,17 @@ void Renderer::draw( MTK::View* pView )
     pEnc->setVertexBuffer( _pVertexDataBuffer, /* offset */ 0, /* index */ 0 );
     pEnc->setVertexBuffer( pInstanceDataBuffer, /* offset */ 0, /* index */ 1 );
     pEnc->setVertexBuffer( pCameraDataBuffer, /* offset */ 0, /* index */ 2 );
+MTL::VertexAmplificationViewMapping mappings[] = {
+    {
+    renderTargetArrayIndexOffset : 0,
+       viewportArrayIndexOffset : 0
+    },
+    {
+    renderTargetArrayIndexOffset : 1,
+       viewportArrayIndexOffset : 0
+    },
+};
+//    pEnc->setVertexAmplificationCount(2, mappings);
 
     pEnc->setFragmentTexture( _pTexture, /* index */ 0 );
 
